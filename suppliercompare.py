@@ -1,17 +1,18 @@
 import streamlit as st
 import pandas as pd
+import re
 
 # ----------------------------------------------------
 # 1. Page Configuration & Layout
 # ----------------------------------------------------
 st.set_page_config(
-    page_title="Project Allocation Comparator",
+    page_title="CRM Supplier Allocation Comparator",
     page_icon="⚖️",
     layout="wide"
 )
 
-st.title("⚖️ Project Supplier Allocation Comparator")
-st.caption("Compare supplier shares and volume between two waves/projects without horizontal scrolling.")
+st.title("⚖️ CRM Supplier Allocation Comparator")
+st.caption("Comparing Previous CRM (131932) vs Recent CRM (149464)")
 st.markdown("---")
 
 # ----------------------------------------------------
@@ -47,15 +48,14 @@ if uploaded_file is not None:
                     return idx
         return 0
 
-    proj_def_idx = get_default_index(["project", "study", "job", "wave"], all_cols)
-    # Prefer name over ID if present
+    proj_def_idx = get_default_index(["project", "study", "crm", "job", "wave"], all_cols)
     supp_def_idx = get_default_index(["supplier name", "vendor name", "panel name", "supplier", "vendor"], all_cols)
     status_def_idx = get_default_index(["status", "disposition"], all_cols)
 
-    project_col = st.sidebar.selectbox("Project / Wave Column:", all_cols, index=proj_def_idx)
-    supplier_col = st.sidebar.selectbox("Supplier Column (Pick Name if available):", all_cols, index=supp_def_idx)
+    project_col = st.sidebar.selectbox("Project / CRM Column:", all_cols, index=proj_def_idx)
+    supplier_col = st.sidebar.selectbox("Supplier Column (Name or ID):", all_cols, index=supp_def_idx)
 
-    # Optional complete status filter
+    # Optional status filter
     filter_completes = st.sidebar.checkbox("Filter by Complete Status?", value=False)
     if filter_completes:
         status_col = st.sidebar.selectbox("Status Column:", all_cols, index=status_def_idx)
@@ -76,115 +76,122 @@ if uploaded_file is not None:
         st.stop()
 
     # ----------------------------------------------------
-    # 3. Project Selection
+    # 3. CRM Project Identification & Selection
     # ----------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.header("🎯 Wave / Project Selection")
+    st.sidebar.header("🎯 CRM Selection")
 
-    proj_a = st.sidebar.selectbox("Baseline (Wave A):", available_projects, index=0)
-    proj_b = st.sidebar.selectbox(
-        "Comparison (Wave B):",
-        available_projects,
-        index=1 if proj_a != available_projects[1] else (0 if len(available_projects) > 1 else 0)
-    )
+    # Smart default finder for 131932 (Prev) and 149464 (Recent)
+    idx_prev = 0
+    idx_recent = 1 if len(available_projects) > 1 else 0
 
-    if proj_a == proj_b:
-        st.warning("Please choose two different projects to compare.")
+    for idx, p in enumerate(available_projects):
+        if "131932" in p:
+            idx_prev = idx
+        elif "149464" in p:
+            idx_recent = idx
+
+    proj_prev = st.sidebar.selectbox("Previous CRM (131932):", available_projects, index=idx_prev)
+    proj_recent = st.sidebar.selectbox("Recent CRM (149464):", available_projects, index=idx_recent)
+
+    if proj_prev == proj_recent:
+        st.warning("Please choose two distinct CRMs to compare.")
         st.stop()
 
-    # Optional shorthand labels so column headers stay tiny
-    use_custom_labels = st.sidebar.checkbox("Use short column labels (keeps table narrow)", value=True)
-    if use_custom_labels:
-        col_name_a = st.sidebar.text_input("Short Name for Wave A:", value="Wave A")
-        col_name_b = st.sidebar.text_input("Short Name for Wave B:", value="Wave B")
-    else:
-        col_name_a = proj_a[:20] + "..." if len(proj_a) > 20 else proj_a
-        col_name_b = proj_b[:20] + "..." if len(proj_b) > 20 else proj_b
+    # Helper function to extract cleanly formatted short labels (e.g. CRM number)
+    def clean_label(full_val, fallback):
+        match = re.search(r"\b\d{5,6}\b", full_val)
+        return match.group(0) if match else fallback
+
+    crm_num_prev = clean_label(proj_prev, "131932")
+    crm_num_recent = clean_label(proj_recent, "149464")
+
+    label_prev = f"{crm_num_prev} (Prev)"
+    label_recent = f"{crm_num_recent} (Recent)"
 
     # Subset datasets
-    df_a = df[df[project_col] == proj_a]
-    df_b = df[df[project_col] == proj_b]
-    tot_a = len(df_a)
-    tot_b = len(df_b)
+    df_prev = df[df[project_col] == proj_prev]
+    df_recent = df[df[project_col] == proj_recent]
+    tot_prev = len(df_prev)
+    tot_recent = len(df_recent)
 
     # ----------------------------------------------------
-    # 4. KPI Top Summary
+    # 4. KPI Top Summary Cards
     # ----------------------------------------------------
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric(f"{col_name_a} Total (N)", f"{tot_a:,}")
-        st.caption(f"📌 *{proj_a}*")
+        st.metric(f"{label_prev} Total", f"{tot_prev:,}")
+        st.caption(f"📌 *{proj_prev}*")
     with k2:
-        st.metric(f"{col_name_b} Total (N)", f"{tot_b:,}")
-        st.caption(f"📌 *{proj_b}*")
+        st.metric(f"{label_recent} Total", f"{tot_recent:,}")
+        st.caption(f"📌 *{proj_recent}*")
     with k3:
-        st.metric("Total Completes", f"{tot_a + tot_b:,}")
+        st.metric("Total Completes", f"{tot_prev + tot_recent:,}")
     with k4:
-        delta_records = tot_b - tot_a
-        st.metric("Sample Variance", f"{abs(delta_records):,}", f"{delta_records:+} {col_name_b} vs {col_name_a}")
+        delta_records = tot_recent - tot_prev
+        st.metric("Completes Diff", f"{abs(delta_records):,}", f"{delta_records:+} Recent vs Prev")
 
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 5. Table View Display Controls
+    # 5. Table View & Controls
     # ----------------------------------------------------
     c_title, c_toggle = st.columns([2, 1])
     with c_title:
-        st.subheader("📊 Supplier Allocation Comparison")
+        st.subheader(f"📊 Allocation: {crm_num_prev} vs {crm_num_recent}")
     with c_toggle:
         metric_view = st.radio(
             "Display Metrics:",
             options=["Share Only (%)", "Both (N & %)", "Counts Only (N)"],
-            index=0,  # Default to % only so it fits on 1 screen with zero scrolling
+            index=0,  # Fits on one screen with no scrolling
             horizontal=True
         )
 
     # Calculate allocations
-    counts_a = df_a[supplier_col].value_counts()
-    counts_b = df_b[supplier_col].value_counts()
-    all_suppliers = sorted(list(set(counts_a.index).union(set(counts_b.index))))
+    counts_prev = df_prev[supplier_col].value_counts()
+    counts_recent = df_recent[supplier_col].value_counts()
+    all_suppliers = sorted(list(set(counts_prev.index).union(set(counts_recent.index))))
 
     rows = []
     for supp in all_suppliers:
-        n_a = int(counts_a.get(supp, 0))
-        n_b = int(counts_b.get(supp, 0))
+        n_prev = int(counts_prev.get(supp, 0))
+        n_recent = int(counts_recent.get(supp, 0))
 
-        pct_a = (n_a / tot_a * 100) if tot_a > 0 else 0.0
-        pct_b = (n_b / tot_b * 100) if tot_b > 0 else 0.0
-        variance = pct_b - pct_a
+        pct_prev = (n_prev / tot_prev * 100) if tot_prev > 0 else 0.0
+        pct_recent = (n_recent / tot_recent * 100) if tot_recent > 0 else 0.0
+        variance = pct_recent - pct_prev
 
         shift_flag = "🔺" if variance > 0.5 else ("🔻" if variance < -0.5 else "➖")
 
         row = {"Supplier": supp}
 
         if metric_view in ["Both (N & %)", "Counts Only (N)"]:
-            row[f"{col_name_a} (N)"] = n_a
-            row[f"{col_name_b} (N)"] = n_b
+            row[f"{label_prev} (N)"] = n_prev
+            row[f"{label_recent} (N)"] = n_recent
 
         if metric_view in ["Both (N & %)", "Share Only (%)"]:
-            row[f"{col_name_a} (%)"] = pct_a
-            row[f"{col_name_b} (%)"] = pct_b
-            row["Variance (B - A)"] = variance
+            row[f"{label_prev} (%)"] = pct_prev
+            row[f"{label_recent} (%)"] = pct_recent
+            row["Variance"] = variance
             row["Trend"] = f"{shift_flag} {variance:+.1f}%"
 
         rows.append(row)
 
     comp_df = pd.DataFrame(rows)
 
-    # Sort descending by wave A volume or share
-    sort_target = f"{col_name_a} (%)" if f"{col_name_a} (%)" in comp_df.columns else f"{col_name_a} (N)"
+    # Sort descending by Previous CRM share/volume
+    sort_target = f"{label_prev} (%)" if f"{label_prev} (%)" in comp_df.columns else f"{label_prev} (N)"
     comp_df = comp_df.sort_values(by=sort_target, ascending=False)
 
-    # Column configuration for compact auto-formatting
+    # Compact column layout
     col_configs = {
         "Supplier": st.column_config.TextColumn("Supplier", width="medium"),
     }
-    if f"{col_name_a} (%)" in comp_df.columns:
-        col_configs[f"{col_name_a} (%)"] = st.column_config.NumberColumn(f"{col_name_a} (%)", format="%.2f%%")
-        col_configs[f"{col_name_b} (%)"] = st.column_config.NumberColumn(f"{col_name_b} (%)", format="%.2f%%")
-        col_configs["Variance (B - A)"] = st.column_config.NumberColumn("Variance", format="%+.2f%%")
+    if f"{label_prev} (%)" in comp_df.columns:
+        col_configs[f"{label_prev} (%)"] = st.column_config.NumberColumn(f"{label_prev} (%)", format="%.2f%%")
+        col_configs[f"{label_recent} (%)"] = st.column_config.NumberColumn(f"{label_recent} (%)", format="%.2f%%")
+        col_configs["Variance"] = st.column_config.NumberColumn(f"Shift ({crm_num_recent} - {crm_num_prev})", format="%+.2f%%")
 
-    # Render table fitting container width
     st.dataframe(
         comp_df,
         column_config=col_configs,
@@ -193,36 +200,36 @@ if uploaded_file is not None:
     )
 
     # ----------------------------------------------------
-    # 6. Share Comparison Bar Chart
+    # 6. Bar Chart
     # ----------------------------------------------------
     st.markdown("---")
-    st.subheader("📈 Visual Allocation Spread")
+    st.subheader("📈 Allocation Share Spread (%)")
 
     chart_prep = []
     for supp in all_suppliers:
-        pct_a = (counts_a.get(supp, 0) / tot_a * 100) if tot_a > 0 else 0.0
-        pct_b = (counts_b.get(supp, 0) / tot_b * 100) if tot_b > 0 else 0.0
+        pct_prev = (counts_prev.get(supp, 0) / tot_prev * 100) if tot_prev > 0 else 0.0
+        pct_recent = (counts_recent.get(supp, 0) / tot_recent * 100) if tot_recent > 0 else 0.0
         chart_prep.append({
             "Supplier": supp,
-            f"{col_name_a} (%)": round(pct_a, 2),
-            f"{col_name_b} (%)": round(pct_b, 2),
+            f"{label_prev} (%)": round(pct_prev, 2),
+            f"{label_recent} (%)": round(pct_recent, 2),
         })
 
     chart_df = pd.DataFrame(chart_prep).set_index("Supplier")
     st.bar_chart(chart_df)
 
     # ----------------------------------------------------
-    # 7. Unmatched Suppliers Alert
+    # 7. Coverage Alerts
     # ----------------------------------------------------
-    only_in_a = [s for s in all_suppliers if counts_a.get(s, 0) > 0 and counts_b.get(s, 0) == 0]
-    only_in_b = [s for s in all_suppliers if counts_b.get(s, 0) > 0 and counts_a.get(s, 0) == 0]
+    only_in_prev = [s for s in all_suppliers if counts_prev.get(s, 0) > 0 and counts_recent.get(s, 0) == 0]
+    only_in_recent = [s for s in all_suppliers if counts_recent.get(s, 0) > 0 and counts_prev.get(s, 0) == 0]
 
-    if only_in_a or only_in_b:
-        with st.expander("⚠️ Supplier Exclusivity Alert", expanded=False):
-            if only_in_a:
-                st.write(f"- **Only in {col_name_a}**: {', '.join(only_in_a)}")
-            if only_in_b:
-                st.write(f"- **Only in {col_name_b}**: {', '.join(only_in_b)}")
+    if only_in_prev or only_in_recent:
+        with st.expander("⚠️ Supplier Exclusivity Notes", expanded=False):
+            if only_in_prev:
+                st.write(f"- **Only present in {crm_num_prev} (Previous)**: {', '.join(only_in_prev)}")
+            if only_in_recent:
+                st.write(f"- **Only present in {crm_num_recent} (Recent)**: {', '.join(only_in_recent)}")
 
 else:
     st.info("👈 Upload your tracker Excel or CSV file in the sidebar to begin.")
