@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ CRM Supplier Allocation Comparator")
-st.caption("Comparing Previous CRM (131932) vs Recent CRM (149464)")
+st.caption("Side-by-side supplier share comparison and automated key shift insights.")
 st.markdown("---")
 
 # ----------------------------------------------------
@@ -91,20 +91,20 @@ if uploaded_file is not None:
         elif "149464" in p:
             idx_recent = idx
 
-    proj_prev = st.sidebar.selectbox("Previous CRM (131932):", available_projects, index=idx_prev)
-    proj_recent = st.sidebar.selectbox("Recent CRM (149464):", available_projects, index=idx_recent)
+    proj_prev = st.sidebar.selectbox("Previous CRM / Wave:", available_projects, index=idx_prev)
+    proj_recent = st.sidebar.selectbox("Recent CRM / Wave:", available_projects, index=idx_recent)
 
     if proj_prev == proj_recent:
         st.warning("Please choose two distinct CRMs to compare.")
         st.stop()
 
-    # Helper function to extract cleanly formatted short labels (e.g. CRM number)
+    # Helper function to extract short labels (e.g., 5-6 digit CRM numbers)
     def clean_label(full_val, fallback):
         match = re.search(r"\b\d{5,6}\b", full_val)
         return match.group(0) if match else fallback
 
-    crm_num_prev = clean_label(proj_prev, "131932")
-    crm_num_recent = clean_label(proj_recent, "149464")
+    crm_num_prev = clean_label(proj_prev, "Previous")
+    crm_num_recent = clean_label(proj_recent, "Recent")
 
     label_prev = f"{crm_num_prev} (Prev)"
     label_recent = f"{crm_num_recent} (Recent)"
@@ -126,33 +126,34 @@ if uploaded_file is not None:
         st.metric(f"{label_recent} Total", f"{tot_recent:,}")
         st.caption(f"📌 *{proj_recent}*")
     with k3:
-        st.metric("Total Completes", f"{tot_prev + tot_recent:,}")
+        st.metric("Combined Completes", f"{tot_prev + tot_recent:,}")
     with k4:
         delta_records = tot_recent - tot_prev
-        st.metric("Completes Diff", f"{abs(delta_records):,}", f"{delta_records:+} Recent vs Prev")
+        st.metric("Sample Variance", f"{abs(delta_records):,}", f"{delta_records:+} Recent vs Prev")
 
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 5. Table View & Controls
+    # 5. Table View & Metric Calculations
     # ----------------------------------------------------
     c_title, c_toggle = st.columns([2, 1])
     with c_title:
-        st.subheader(f"📊 Allocation: {crm_num_prev} vs {crm_num_recent}")
+        st.subheader(f"📊 Allocation Breakdown: {crm_num_prev} vs {crm_num_recent}")
     with c_toggle:
         metric_view = st.radio(
             "Display Metrics:",
             options=["Share Only (%)", "Both (N & %)", "Counts Only (N)"],
-            index=0,  # Fits on one screen with no scrolling
+            index=0,  # Zero horizontal scrolling
             horizontal=True
         )
 
-    # Calculate allocations
     counts_prev = df_prev[supplier_col].value_counts()
     counts_recent = df_recent[supplier_col].value_counts()
     all_suppliers = sorted(list(set(counts_prev.index).union(set(counts_recent.index))))
 
     rows = []
+    shifts = []  # To feed the summary engine
+
     for supp in all_suppliers:
         n_prev = int(counts_prev.get(supp, 0))
         n_recent = int(counts_recent.get(supp, 0))
@@ -162,6 +163,15 @@ if uploaded_file is not None:
         variance = pct_recent - pct_prev
 
         shift_flag = "🔺" if variance > 0.5 else ("🔻" if variance < -0.5 else "➖")
+
+        shifts.append({
+            "supplier": supp,
+            "n_prev": n_prev,
+            "pct_prev": pct_prev,
+            "n_recent": n_recent,
+            "pct_recent": pct_recent,
+            "variance": variance
+        })
 
         row = {"Supplier": supp}
 
@@ -179,11 +189,11 @@ if uploaded_file is not None:
 
     comp_df = pd.DataFrame(rows)
 
-    # Sort descending by Previous CRM share/volume
-    sort_target = f"{label_prev} (%)" if f"{label_prev} (%)" in comp_df.columns else f"{label_prev} (N)"
+    # Sort descending by Recent share (or Recent count)
+    sort_target = f"{label_recent} (%)" if f"{label_recent} (%)" in comp_df.columns else f"{label_recent} (N)"
     comp_df = comp_df.sort_values(by=sort_target, ascending=False)
 
-    # Compact column layout
+    # Column configuration for compact display
     col_configs = {
         "Supplier": st.column_config.TextColumn("Supplier", width="medium"),
     }
@@ -200,36 +210,65 @@ if uploaded_file is not None:
     )
 
     # ----------------------------------------------------
-    # 6. Bar Chart
+    # 6. Automated Executive Summary & Reading Guide
     # ----------------------------------------------------
     st.markdown("---")
-    st.subheader("📈 Allocation Share Spread (%)")
+    st.subheader("📝 Executive Summary & Shift Analysis")
+    st.caption("Plain-language breakdown of key sample movements between the two waves.")
 
-    chart_prep = []
-    for supp in all_suppliers:
-        pct_prev = (counts_prev.get(supp, 0) / tot_prev * 100) if tot_prev > 0 else 0.0
-        pct_recent = (counts_recent.get(supp, 0) / tot_recent * 100) if tot_recent > 0 else 0.0
-        chart_prep.append({
-            "Supplier": supp,
-            f"{label_prev} (%)": round(pct_prev, 2),
-            f"{label_recent} (%)": round(pct_recent, 2),
-        })
+    # Convert shifts to DataFrame for quick ranking
+    shifts_df = pd.DataFrame(shifts)
 
-    chart_df = pd.DataFrame(chart_prep).set_index("Supplier")
-    st.bar_chart(chart_df)
+    # 1. Top Contributors in Recent Wave
+    top_recent = shifts_df.sort_values(by="pct_recent", ascending=False).head(3)
+    top_recent_text = ", ".join(
+        [f"**{r['supplier']}** ({r['pct_recent']:.1f}% share, {r['n_recent']:,} completes)" for _, r in top_recent.iterrows() if r['pct_recent'] > 0]
+    )
 
-    # ----------------------------------------------------
-    # 7. Coverage Alerts
-    # ----------------------------------------------------
+    # 2. Significant Increases (Gainers >= +1.0%)
+    gainers = shifts_df[shifts_df["variance"] >= 1.0].sort_values(by="variance", ascending=False)
+    # 3. Significant Decreases (Cutbacks <= -1.0%)
+    cutbacks = shifts_df[shifts_df["variance"] <= -1.0].sort_values(by="variance", ascending=True)
+
+    # 4. Exclusive Suppliers
     only_in_prev = [s for s in all_suppliers if counts_prev.get(s, 0) > 0 and counts_recent.get(s, 0) == 0]
     only_in_recent = [s for s in all_suppliers if counts_recent.get(s, 0) > 0 and counts_prev.get(s, 0) == 0]
 
-    if only_in_prev or only_in_recent:
-        with st.expander("⚠️ Supplier Exclusivity Notes", expanded=False):
-            if only_in_prev:
-                st.write(f"- **Only present in {crm_num_prev} (Previous)**: {', '.join(only_in_prev)}")
+    with st.container(border=True):
+        st.markdown(f"#### 🔎 What the numbers are telling us:")
+
+        # Summary item 1: Volume Drivers
+        st.markdown(f"1. **Primary Volume Drivers in {crm_num_recent}:**\n   * The largest contributors in the recent wave are {top_recent_text if top_recent_text else 'None'}.")
+
+        # Summary item 2: Major Increases
+        if not gainers.empty:
+            gain_bullets = [
+                f"**{r['supplier']}**: Increased by **{r['variance']:+.1f}%** (rose from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
+                for _, r in gainers.iterrows()
+            ]
+            st.markdown(f"2. **Increased Supplier Allocation (Shifted Up):**\n   * " + "\n   * ".join(gain_bullets))
+        else:
+            st.markdown(f"2. **Increased Supplier Allocation:**\n   * No supplier gained more than 1.0% share.")
+
+        # Summary item 3: Major Decreases
+        if not cutbacks.empty:
+            cut_bullets = [
+                f"**{r['supplier']}**: Dropped by **{r['variance']:.1f}%** (fell from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
+                for _, r in cutbacks.iterrows()
+            ]
+            st.markdown(f"3. **Reduced Supplier Allocation (Shifted Down):**\n   * " + "\n   * ".join(cut_bullets))
+        else:
+            st.markdown(f"3. **Reduced Supplier Allocation:**\n   * No supplier dropped by more than 1.0% share.")
+
+        # Summary item 4: Exclusivity & Turnover
+        if only_in_recent or only_in_prev:
+            st.markdown(f"4. **Panel Composition Turnover:**")
             if only_in_recent:
-                st.write(f"- **Only present in {crm_num_recent} (Recent)**: {', '.join(only_in_recent)}")
+                st.markdown(f"   * 🟢 **New in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_recent])} (was not used in {crm_num_prev}).")
+            if only_in_prev:
+                st.markdown(f"   * 🔴 **Inactive in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_prev])} (only used in {crm_num_prev}).")
+        else:
+            st.markdown(f"4. **Panel Composition Turnover:**\n   * ✅ Consistent supplier set: Both waves used the exact same supplier list.")
 
 else:
     st.info("👈 Upload your tracker Excel or CSV file in the sidebar to begin.")
