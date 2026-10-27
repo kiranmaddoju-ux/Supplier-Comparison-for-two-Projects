@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ CRM Supplier Allocation Comparator")
-st.caption("Side-by-side supplier share comparison and automated key shift insights.")
+st.caption("Side-by-side supplier share comparison with wave rollup & automated shift analysis.")
 st.markdown("---")
 
 # ----------------------------------------------------
@@ -50,68 +50,84 @@ if uploaded_file is not None:
 
     proj_def_idx = get_default_index(["project", "study", "crm", "job", "wave"], all_cols)
     supp_def_idx = get_default_index(["supplier name", "vendor name", "panel name", "supplier", "vendor"], all_cols)
-    status_def_idx = get_default_index(["status", "disposition"], all_cols)
+    status_def_idx = get_default_index(["status", "disposition", "resp_status"], all_cols)
 
     project_col = st.sidebar.selectbox("Project / CRM Column:", all_cols, index=proj_def_idx)
     supplier_col = st.sidebar.selectbox("Supplier Column (Name or ID):", all_cols, index=supp_def_idx)
 
-    # Optional status filter
-    filter_completes = st.sidebar.checkbox("Filter by Complete Status?", value=False)
+    # Status / Completes Filter (e.g. 21 or Complete)
+    filter_completes = st.sidebar.checkbox("Filter by Complete Status (e.g. 21)?", value=True)
     if filter_completes:
         status_col = st.sidebar.selectbox("Status Column:", all_cols, index=status_def_idx)
-        available_statuses = sorted(df[status_col].dropna().astype(str).unique())
-        selected_status = st.sidebar.multiselect("Select 'Complete' statuses to keep:", available_statuses)
+        # Convert all to string clean format
+        available_statuses = sorted([str(s).split('.')[0].strip() for s in df[status_col].dropna().unique()])
+        
+        # Auto-pick 21 or 'complete' if present
+        default_status = [s for s in available_statuses if s.lower() in ['21', 'complete', 'completed']]
+        selected_status = st.sidebar.multiselect(
+            "Select Status to keep:", 
+            options=available_statuses,
+            default=default_status if default_status else None
+        )
         if selected_status:
-            df = df[df[status_col].astype(str).isin(selected_status)]
+            clean_status_col = df[status_col].astype(str).str.split('.').str[0].str.strip()
+            df = df[clean_status_col.isin(selected_status)].copy()
 
     # Clean identifiers
     df = df.dropna(subset=[project_col, supplier_col]).copy()
     df[project_col] = df[project_col].astype(str).str.strip()
     df[supplier_col] = df[supplier_col].astype(str).str.strip()
 
-    available_projects = sorted(df[project_col].unique())
-
-    if len(available_projects) < 2:
-        st.warning(f"Found {len(available_projects)} unique project(s) in `{project_col}`. At least 2 projects are required.")
-        st.stop()
+    unique_projects = sorted(df[project_col].unique())
 
     # ----------------------------------------------------
-    # 3. CRM Project Identification & Selection
+    # 3. Wave Rollup & Grouping
     # ----------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.header("🎯 CRM Selection")
+    st.sidebar.header("🎯 CRM / Wave Grouping")
 
-    # Smart default finder for 131932 (Prev) and 149464 (Recent)
-    idx_prev = 0
-    idx_recent = 1 if len(available_projects) > 1 else 0
+    grouping_mode = st.sidebar.radio(
+        "Grouping Mode:",
+        options=["Auto-detect CRM Numbers (e.g. 131932 vs 149464)", "Manual Project Selection"],
+        index=0
+    )
 
-    for idx, p in enumerate(available_projects):
-        if "131932" in p:
-            idx_prev = idx
-        elif "149464" in p:
-            idx_recent = idx
+    if grouping_mode == "Auto-detect CRM Numbers (e.g. 131932 vs 149464)":
+        crm_a_input = st.sidebar.text_input("Previous CRM ID:", value="131932")
+        crm_b_input = st.sidebar.text_input("Recent CRM ID:", value="149464")
 
-    proj_prev = st.sidebar.selectbox("Previous CRM / Wave:", available_projects, index=idx_prev)
-    proj_recent = st.sidebar.selectbox("Recent CRM / Wave:", available_projects, index=idx_recent)
+        # Match any project string containing the CRM ID
+        # For CRM A, avoid matching strings that belong to CRM B (e.g. '149464 -131932')
+        projects_b = [p for p in unique_projects if crm_b_input in p]
+        projects_a = [p for p in unique_projects if crm_a_input in p and p not in projects_b]
 
-    if proj_prev == proj_recent:
-        st.warning("Please choose two distinct CRMs to compare.")
+        st.sidebar.caption(f"**{crm_a_input} matches:** {len(projects_a)} segment(s)")
+        st.sidebar.caption(f"**{crm_b_input} matches:** {len(projects_b)} segment(s)")
+
+        label_prev = f"{crm_a_input} (Prev)"
+        label_recent = f"{crm_b_input} (Recent)"
+        crm_num_prev = crm_a_input
+        crm_num_recent = crm_b_input
+
+    else:
+        # Manual selection mode with multiselect
+        label_prev = st.sidebar.text_input("Previous Wave Label:", value="Previous Wave")
+        projects_a = st.sidebar.multiselect("Select all projects for Previous Wave:", unique_projects)
+        
+        label_recent = st.sidebar.text_input("Recent Wave Label:", value="Recent Wave")
+        projects_b = st.sidebar.multiselect("Select all projects for Recent Wave:", unique_projects)
+
+        crm_num_prev = label_prev
+        crm_num_recent = label_recent
+
+    if not projects_a or not projects_b:
+        st.warning("Please ensure both waves have at least one matched project.")
         st.stop()
 
-    # Helper function to extract short labels (e.g., 5-6 digit CRM numbers)
-    def clean_label(full_val, fallback):
-        match = re.search(r"\b\d{5,6}\b", full_val)
-        return match.group(0) if match else fallback
+    # Create Wave Subsets
+    df_prev = df[df[project_col].isin(projects_a)]
+    df_recent = df[df[project_col].isin(projects_b)]
 
-    crm_num_prev = clean_label(proj_prev, "Previous")
-    crm_num_recent = clean_label(proj_recent, "Recent")
-
-    label_prev = f"{crm_num_prev} (Prev)"
-    label_recent = f"{crm_num_recent} (Recent)"
-
-    # Subset datasets
-    df_prev = df[df[project_col] == proj_prev]
-    df_recent = df[df[project_col] == proj_recent]
     tot_prev = len(df_prev)
     tot_recent = len(df_recent)
 
@@ -120,11 +136,11 @@ if uploaded_file is not None:
     # ----------------------------------------------------
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric(f"{label_prev} Total", f"{tot_prev:,}")
-        st.caption(f"📌 *{proj_prev}*")
+        st.metric(f"{label_prev} Total (N)", f"{tot_prev:,}")
+        st.caption(f"Combined from {len(projects_a)} segment(s)")
     with k2:
-        st.metric(f"{label_recent} Total", f"{tot_recent:,}")
-        st.caption(f"📌 *{proj_recent}*")
+        st.metric(f"{label_recent} Total (N)", f"{tot_recent:,}")
+        st.caption(f"Combined from {len(projects_b)} segment(s)")
     with k3:
         st.metric("Combined Completes", f"{tot_prev + tot_recent:,}")
     with k4:
@@ -152,7 +168,7 @@ if uploaded_file is not None:
     all_suppliers = sorted(list(set(counts_prev.index).union(set(counts_recent.index))))
 
     rows = []
-    shifts = []  # To feed the summary engine
+    shifts = []
 
     for supp in all_suppliers:
         n_prev = int(counts_prev.get(supp, 0))
@@ -189,11 +205,9 @@ if uploaded_file is not None:
 
     comp_df = pd.DataFrame(rows)
 
-    # Sort descending by Recent share (or Recent count)
     sort_target = f"{label_recent} (%)" if f"{label_recent} (%)" in comp_df.columns else f"{label_recent} (N)"
     comp_df = comp_df.sort_values(by=sort_target, ascending=False)
 
-    # Column configuration for compact display
     col_configs = {
         "Supplier": st.column_config.TextColumn("Supplier", width="medium"),
     }
@@ -216,29 +230,27 @@ if uploaded_file is not None:
     st.subheader("📝 Executive Summary & Shift Analysis")
     st.caption("Plain-language breakdown of key sample movements between the two waves.")
 
-    # Convert shifts to DataFrame for quick ranking
     shifts_df = pd.DataFrame(shifts)
 
-    # 1. Top Contributors in Recent Wave
+    # Top Contributors in Recent Wave
     top_recent = shifts_df.sort_values(by="pct_recent", ascending=False).head(3)
     top_recent_text = ", ".join(
         [f"**{r['supplier']}** ({r['pct_recent']:.1f}% share, {r['n_recent']:,} completes)" for _, r in top_recent.iterrows() if r['pct_recent'] > 0]
     )
 
-    # 2. Significant Increases (Gainers >= +1.0%)
+    # Significant Increases & Decreases
     gainers = shifts_df[shifts_df["variance"] >= 1.0].sort_values(by="variance", ascending=False)
-    # 3. Significant Decreases (Cutbacks <= -1.0%)
     cutbacks = shifts_df[shifts_df["variance"] <= -1.0].sort_values(by="variance", ascending=True)
 
-    # 4. Exclusive Suppliers
+    # Exclusive Suppliers
     only_in_prev = [s for s in all_suppliers if counts_prev.get(s, 0) > 0 and counts_recent.get(s, 0) == 0]
     only_in_recent = [s for s in all_suppliers if counts_recent.get(s, 0) > 0 and counts_prev.get(s, 0) == 0]
 
     with st.container(border=True):
-        st.markdown(f"#### 🔎 What the numbers are telling us:")
+        st.markdown(f"#### 🔎 Key Takeaways:")
 
         # Summary item 1: Volume Drivers
-        st.markdown(f"1. **Primary Volume Drivers in {crm_num_recent}:**\n   * The largest contributors in the recent wave are {top_recent_text if top_recent_text else 'None'}.")
+        st.markdown(f"1. **Primary Volume Drivers in {crm_num_recent}:**\n   * The largest panel contributors in the recent wave are {top_recent_text if top_recent_text else 'None'}.")
 
         # Summary item 2: Major Increases
         if not gainers.empty:
@@ -264,9 +276,9 @@ if uploaded_file is not None:
         if only_in_recent or only_in_prev:
             st.markdown(f"4. **Panel Composition Turnover:**")
             if only_in_recent:
-                st.markdown(f"   * 🟢 **New in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_recent])} (was not used in {crm_num_prev}).")
+                st.markdown(f"   * 🟢 **New in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_recent])} (not present in {crm_num_prev}).")
             if only_in_prev:
-                st.markdown(f"   * 🔴 **Inactive in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_prev])} (only used in {crm_num_prev}).")
+                st.markdown(f"   * 🔴 **Inactive in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_prev])} (only present in {crm_num_prev}).")
         else:
             st.markdown(f"4. **Panel Composition Turnover:**\n   * ✅ Consistent supplier set: Both waves used the exact same supplier list.")
 
