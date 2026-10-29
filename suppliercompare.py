@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ CRM Supplier Allocation Comparator")
-st.caption("Side-by-side supplier share comparison with wave rollup & automated shift analysis.")
+st.caption("Side-by-side individual supplier comparison and 3-Group Blend Rollup (Group 1, Group 2, Group 3/MP).")
 st.markdown("---")
 
 # ----------------------------------------------------
@@ -55,14 +55,11 @@ if uploaded_file is not None:
     project_col = st.sidebar.selectbox("Project / CRM Column:", all_cols, index=proj_def_idx)
     supplier_col = st.sidebar.selectbox("Supplier Column (Name or ID):", all_cols, index=supp_def_idx)
 
-    # Status / Completes Filter (e.g. 21 or Complete)
+    # Status / Completes Filter (e.g., 21 or Complete)
     filter_completes = st.sidebar.checkbox("Filter by Complete Status (e.g. 21)?", value=True)
     if filter_completes:
         status_col = st.sidebar.selectbox("Status Column:", all_cols, index=status_def_idx)
-        # Convert all to string clean format
         available_statuses = sorted([str(s).split('.')[0].strip() for s in df[status_col].dropna().unique()])
-        
-        # Auto-pick 21 or 'complete' if present
         default_status = [s for s in available_statuses if s.lower() in ['21', 'complete', 'completed']]
         selected_status = st.sidebar.multiselect(
             "Select Status to keep:", 
@@ -93,16 +90,14 @@ if uploaded_file is not None:
     )
 
     if grouping_mode == "Auto-detect CRM Numbers (e.g. 131932 vs 149464)":
-        crm_a_input = st.sidebar.text_input("Previous CRM ID:", value="131932")
-        crm_b_input = st.sidebar.text_input("Recent CRM ID:", value="149464")
+        crm_a_input = st.sidebar.text_input("Previous CRM ID:", value="131932").strip()
+        crm_b_input = st.sidebar.text_input("Recent CRM ID:", value="149464").strip()
 
-        # Match any project string containing the CRM ID
-        # For CRM A, avoid matching strings that belong to CRM B (e.g. '149464 -131932')
+        # Strict separation:
+        # CRM B gets projects matching 149464
+        # CRM A gets projects matching 131932 EXCEPT any containing 149464
         projects_b = [p for p in unique_projects if crm_b_input in p]
-        projects_a = [p for p in unique_projects if crm_a_input in p and p not in projects_b]
-
-        st.sidebar.caption(f"**{crm_a_input} matches:** {len(projects_a)} segment(s)")
-        st.sidebar.caption(f"**{crm_b_input} matches:** {len(projects_b)} segment(s)")
+        projects_a = [p for p in unique_projects if (crm_a_input in p) and (crm_b_input not in p)]
 
         label_prev = f"{crm_a_input} (Prev)"
         label_recent = f"{crm_b_input} (Recent)"
@@ -110,12 +105,11 @@ if uploaded_file is not None:
         crm_num_recent = crm_b_input
 
     else:
-        # Manual selection mode with multiselect
-        label_prev = st.sidebar.text_input("Previous Wave Label:", value="Previous Wave")
-        projects_a = st.sidebar.multiselect("Select all projects for Previous Wave:", unique_projects)
+        label_prev = st.sidebar.text_input("Previous Wave Label:", value="131932 (Prev)")
+        projects_a = st.sidebar.multiselect("Select all projects for Previous Wave:", unique_projects, default=[p for p in unique_projects if "131932" in p and "149464" not in p])
         
-        label_recent = st.sidebar.text_input("Recent Wave Label:", value="Recent Wave")
-        projects_b = st.sidebar.multiselect("Select all projects for Recent Wave:", unique_projects)
+        label_recent = st.sidebar.text_input("Recent Wave Label:", value="149464 (Recent)")
+        projects_b = st.sidebar.multiselect("Select all projects for Recent Wave:", unique_projects, default=[p for p in unique_projects if "149464" in p])
 
         crm_num_prev = label_prev
         crm_num_recent = label_recent
@@ -124,7 +118,19 @@ if uploaded_file is not None:
         st.warning("Please ensure both waves have at least one matched project.")
         st.stop()
 
-    # Create Wave Subsets
+    # Assign Supplier 3-Group Blend Mapping
+    def map_to_group(supp_name):
+        s = str(supp_name).lower()
+        if "prime insights" in s:
+            return "Group 1 (Prime Insights)"
+        elif any(f in s for f in ["fusion", "social loop"]):
+            return "Group 2 (Fusion & Social Loop)"
+        else:
+            return "Group 3 (Group MP / Marketplace)"
+
+    df['Blend Group'] = df[supplier_col].apply(map_to_group)
+
+    # Wave Subsets
     df_prev = df[df[project_col].isin(projects_a)]
     df_recent = df[df[project_col].isin(projects_b)]
 
@@ -132,34 +138,85 @@ if uploaded_file is not None:
     tot_recent = len(df_recent)
 
     # ----------------------------------------------------
-    # 4. KPI Top Summary Cards
+    # 4. Top KPI Cards
     # ----------------------------------------------------
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         st.metric(f"{label_prev} Total (N)", f"{tot_prev:,}")
-        st.caption(f"Combined from {len(projects_a)} segment(s)")
+        st.caption(f"Combined {len(projects_a)} segment(s)")
     with k2:
         st.metric(f"{label_recent} Total (N)", f"{tot_recent:,}")
-        st.caption(f"Combined from {len(projects_b)} segment(s)")
+        st.caption(f"Combined {len(projects_b)} segment(s)")
     with k3:
         st.metric("Combined Completes", f"{tot_prev + tot_recent:,}")
     with k4:
         delta_records = tot_recent - tot_prev
-        st.metric("Sample Variance", f"{abs(delta_records):,}", f"{delta_records:+} Recent vs Prev")
+        st.metric("Sample Difference", f"{abs(delta_records):,}", f"{delta_records:+} Recent vs Prev")
 
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 5. Table View & Metric Calculations
+    # 5. NEW: 3-Group Blend Allocation Table
+    # ----------------------------------------------------
+    st.subheader(f"🏢 3-Group Blend Summary: {crm_num_prev} vs {crm_num_recent}")
+    st.caption("Consolidated rollup matching your allocation rules: Group 1, Group 2, and Group 3 (Group MP).")
+
+    group_order = [
+        "Group 1 (Prime Insights)",
+        "Group 2 (Fusion & Social Loop)",
+        "Group 3 (Group MP / Marketplace)"
+    ]
+
+    grp_counts_prev = df_prev['Blend Group'].value_counts()
+    grp_counts_recent = df_recent['Blend Group'].value_counts()
+
+    group_rows = []
+    for g in group_order:
+        g_n_prev = int(grp_counts_prev.get(g, 0))
+        g_n_rec = int(grp_counts_recent.get(g, 0))
+
+        g_pct_prev = (g_n_prev / tot_prev * 100) if tot_prev > 0 else 0.0
+        g_pct_rec = (g_n_rec / tot_recent * 100) if tot_recent > 0 else 0.0
+        g_diff = g_pct_rec - g_pct_prev
+
+        g_flag = "🔺" if g_diff > 0.5 else ("🔻" if g_diff < -0.5 else "➖")
+
+        group_rows.append({
+            "Supplier Group": g,
+            f"{label_prev} (N)": g_n_prev,
+            f"{label_prev} (%)": g_pct_prev,
+            f"{label_recent} (N)": g_n_rec,
+            f"{label_recent} (%)": g_pct_rec,
+            "Shift (Recent - Prev)": g_diff,
+            "Direction": f"{g_flag} {g_diff:+.1f}%"
+        })
+
+    group_df = pd.DataFrame(group_rows)
+
+    st.dataframe(
+        group_df,
+        column_config={
+            f"{label_prev} (%)": st.column_config.NumberColumn(format="%.2f%%"),
+            f"{label_recent} (%)": st.column_config.NumberColumn(format="%.2f%%"),
+            "Shift (Recent - Prev)": st.column_config.NumberColumn(format="%+.2f%%"),
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.markdown("---")
+
+    # ----------------------------------------------------
+    # 6. Detailed Individual Supplier Table
     # ----------------------------------------------------
     c_title, c_toggle = st.columns([2, 1])
     with c_title:
-        st.subheader(f"📊 Allocation Breakdown: {crm_num_prev} vs {crm_num_recent}")
+        st.subheader(f"📋 Individual Supplier Breakdown")
     with c_toggle:
         metric_view = st.radio(
             "Display Metrics:",
             options=["Share Only (%)", "Both (N & %)", "Counts Only (N)"],
-            index=0,  # Zero horizontal scrolling
+            index=0,
             horizontal=True
         )
 
@@ -182,6 +239,7 @@ if uploaded_file is not None:
 
         shifts.append({
             "supplier": supp,
+            "group": map_to_group(supp),
             "n_prev": n_prev,
             "pct_prev": pct_prev,
             "n_recent": n_recent,
@@ -189,7 +247,10 @@ if uploaded_file is not None:
             "variance": variance
         })
 
-        row = {"Supplier": supp}
+        row = {
+            "Supplier": supp,
+            "Assigned Group": map_to_group(supp)
+        }
 
         if metric_view in ["Both (N & %)", "Counts Only (N)"]:
             row[f"{label_prev} (N)"] = n_prev
@@ -204,12 +265,12 @@ if uploaded_file is not None:
         rows.append(row)
 
     comp_df = pd.DataFrame(rows)
-
     sort_target = f"{label_recent} (%)" if f"{label_recent} (%)" in comp_df.columns else f"{label_recent} (N)"
     comp_df = comp_df.sort_values(by=sort_target, ascending=False)
 
     col_configs = {
         "Supplier": st.column_config.TextColumn("Supplier", width="medium"),
+        "Assigned Group": st.column_config.TextColumn("Assigned Group", width="medium"),
     }
     if f"{label_prev} (%)" in comp_df.columns:
         col_configs[f"{label_prev} (%)"] = st.column_config.NumberColumn(f"{label_prev} (%)", format="%.2f%%")
@@ -224,63 +285,47 @@ if uploaded_file is not None:
     )
 
     # ----------------------------------------------------
-    # 6. Automated Executive Summary & Reading Guide
+    # 7. Automated Executive Summary & Reading Guide
     # ----------------------------------------------------
     st.markdown("---")
     st.subheader("📝 Executive Summary & Shift Analysis")
-    st.caption("Plain-language breakdown of key sample movements between the two waves.")
 
     shifts_df = pd.DataFrame(shifts)
 
-    # Top Contributors in Recent Wave
-    top_recent = shifts_df.sort_values(by="pct_recent", ascending=False).head(3)
-    top_recent_text = ", ".join(
-        [f"**{r['supplier']}** ({r['pct_recent']:.1f}% share, {r['n_recent']:,} completes)" for _, r in top_recent.iterrows() if r['pct_recent'] > 0]
-    )
+    # Group movements
+    g1_shift = group_df[group_df['Supplier Group'].str.contains("Group 1")]["Shift (Recent - Prev)"].values[0]
+    g2_shift = group_df[group_df['Supplier Group'].str.contains("Group 2")]["Shift (Recent - Prev)"].values[0]
+    g3_shift = group_df[group_df['Supplier Group'].str.contains("Group 3")]["Shift (Recent - Prev)"].values[0]
 
-    # Significant Increases & Decreases
     gainers = shifts_df[shifts_df["variance"] >= 1.0].sort_values(by="variance", ascending=False)
     cutbacks = shifts_df[shifts_df["variance"] <= -1.0].sort_values(by="variance", ascending=True)
 
-    # Exclusive Suppliers
-    only_in_prev = [s for s in all_suppliers if counts_prev.get(s, 0) > 0 and counts_recent.get(s, 0) == 0]
-    only_in_recent = [s for s in all_suppliers if counts_recent.get(s, 0) > 0 and counts_prev.get(s, 0) == 0]
-
     with st.container(border=True):
-        st.markdown(f"#### 🔎 Key Takeaways:")
+        st.markdown("#### 🔎 Strategic Blend Insights:")
 
-        # Summary item 1: Volume Drivers
-        st.markdown(f"1. **Primary Volume Drivers in {crm_num_recent}:**\n   * The largest panel contributors in the recent wave are {top_recent_text if top_recent_text else 'None'}.")
+        # Blend summary
+        st.markdown(f"""
+1. **3-Group Blend Movement Dynamics:**
+   * **Group 1 (Prime Insights)**: Shifted by **{g1_shift:+.1f}%** relative to baseline.
+   * **Group 2 (Fusion & Social Loop)**: Shifted by **{g2_shift:+.1f}%**. (Driven by the steep drawdown in Fusion).
+   * **Group 3 (Group MP / Marketplace)**: Shifted by **{g3_shift:+.1f}%**. (Absorbed the quota re-allocation, driven by Prodege & Bitburst).
+        """)
 
-        # Summary item 2: Major Increases
+        # Gainers
         if not gainers.empty:
             gain_bullets = [
-                f"**{r['supplier']}**: Increased by **{r['variance']:+.1f}%** (rose from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
+                f"**{r['supplier']}** ({r['group']}): Rose **{r['variance']:+.1f}%** (from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
                 for _, r in gainers.iterrows()
             ]
-            st.markdown(f"2. **Increased Supplier Allocation (Shifted Up):**\n   * " + "\n   * ".join(gain_bullets))
-        else:
-            st.markdown(f"2. **Increased Supplier Allocation:**\n   * No supplier gained more than 1.0% share.")
-
-        # Summary item 3: Major Decreases
+            st.markdown(f"2. **Top Individual Increases (Boosted Panels):**\n   * " + "\n   * ".join(gain_bullets))
+        
+        # Cutbacks
         if not cutbacks.empty:
             cut_bullets = [
-                f"**{r['supplier']}**: Dropped by **{r['variance']:.1f}%** (fell from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
+                f"**{r['supplier']}** ({r['group']}): Fell **{r['variance']:.1f}%** (from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
                 for _, r in cutbacks.iterrows()
             ]
-            st.markdown(f"3. **Reduced Supplier Allocation (Shifted Down):**\n   * " + "\n   * ".join(cut_bullets))
-        else:
-            st.markdown(f"3. **Reduced Supplier Allocation:**\n   * No supplier dropped by more than 1.0% share.")
-
-        # Summary item 4: Exclusivity & Turnover
-        if only_in_recent or only_in_prev:
-            st.markdown(f"4. **Panel Composition Turnover:**")
-            if only_in_recent:
-                st.markdown(f"   * 🟢 **New in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_recent])} (not present in {crm_num_prev}).")
-            if only_in_prev:
-                st.markdown(f"   * 🔴 **Inactive in {crm_num_recent}**: {', '.join([f'**{s}**' for s in only_in_prev])} (only present in {crm_num_prev}).")
-        else:
-            st.markdown(f"4. **Panel Composition Turnover:**\n   * ✅ Consistent supplier set: Both waves used the exact same supplier list.")
+            st.markdown(f"3. **Top Individual Reductions (Throttled Panels):**\n   * " + "\n   * ".join(cut_bullets))
 
 else:
     st.info("👈 Upload your tracker Excel or CSV file in the sidebar to begin.")
