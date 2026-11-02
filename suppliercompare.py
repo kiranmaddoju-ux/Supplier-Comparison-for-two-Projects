@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
+import os
 
 # ----------------------------------------------------
 # 1. Page Configuration & Layout
@@ -12,14 +13,72 @@ st.set_page_config(
 )
 
 st.title("⚖️ Wave & Supplier Allocation Comparator")
-st.caption("Upload tracking files to compare supplier blends across any two waves or project segments.")
+st.caption("Compare supplier allocations between waves and benchmark against David's UK Master Blend Target Rules.")
 st.markdown("---")
 
 # ----------------------------------------------------
-# 2. File Upload & Ingestion
+# 2. Master Blend Target Parser (David Column)
+# ----------------------------------------------------
+@st.cache_data
+def load_david_targets(rule_file_source=None):
+    """
+    Parses columns 0 to 3 of the 'Blend' sheet (David Column targets)
+    """
+    try:
+        if rule_file_source is not None:
+            raw = pd.read_excel(rule_file_source, sheet_name="Blend")
+        elif os.path.exists("internal_master_rules.xlsx"):
+            raw = pd.read_excel("internal_master_rules.xlsx", sheet_name="Blend")
+        else:
+            return pd.DataFrame(), {}
+
+        # First 4 columns: Country, Group (David), Supplier, Allocation
+        df_rules = raw.iloc[:, [0, 1, 2, 3]].copy()
+        df_rules.columns = ['Country', 'Group', 'Supplier', 'Allocation']
+        df_rules['Country'] = df_rules['Country'].ffill()
+
+        target_allocations = []
+        supplier_mapping = {}
+        current_group = None
+
+        for _, row in df_rules.iterrows():
+            country = str(row['Country']).strip()
+            grp = str(row['Group']).strip()
+            supp = str(row['Supplier']).strip()
+            alloc = row['Allocation']
+
+            if grp.lower() == "group assignments" or country.lower() == "nan":
+                continue
+
+            if grp != "nan":
+                current_group = grp
+                try:
+                    alloc_val = float(alloc)
+                    target_allocations.append({
+                        "Country": country,
+                        "Supplier Group": current_group,
+                        "Target Allocation": alloc_val
+                    })
+                except (ValueError, TypeError):
+                    pass
+
+            if supp != "nan" and current_group:
+                supplier_mapping[(country.lower(), supp.lower())] = current_group
+
+        return pd.DataFrame(target_allocations), supplier_mapping
+    except Exception as e:
+        st.sidebar.error(f"Error loading master rules: {e}")
+        return pd.DataFrame(), {}
+
+# ----------------------------------------------------
+# 3. Sidebar Ingestion & Data Preparation
 # ----------------------------------------------------
 st.sidebar.header("📁 Ingestion")
-uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload Tracker CSV or Excel", type=["csv", "xlsx", "xls"])
+
+# Optional manual upload for master rules if not in repo
+rule_file = st.sidebar.file_uploader("Upload Master Rules Excel (Optional)", type=["xlsx", "xls"], key="rules_uploader")
+target_df, master_supplier_map = load_david_targets(rule_file)
 
 if uploaded_file is not None:
     try:
@@ -78,61 +137,35 @@ if uploaded_file is not None:
     unique_projects = sorted(df[project_col].unique())
 
     # ----------------------------------------------------
-    # 3. Flexible Wave Grouping (Universal for Any File)
+    # 4. Wave Definition (Multiselect Picker)
     # ----------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.header("🎯 Wave / Study Grouping")
+    st.sidebar.header("🎯 Wave Selection")
 
-    group_mode = st.sidebar.radio(
-        "Wave Definition Method:",
-        ["Select Project Segments (Multiselect)", "Match by Keyword / CRM ID"],
-        index=0
-    )
+    label_prev = st.sidebar.text_input("Baseline Wave Name:", value="Previous Wave")
+    default_a = [unique_projects[0]] if unique_projects else []
+    projects_a = st.sidebar.multiselect("Select project(s) for Baseline Wave:", options=unique_projects, default=default_a)
 
-    if group_mode == "Select Project Segments (Multiselect)":
-        label_prev = st.sidebar.text_input("Baseline Wave Name:", value="Wave Baseline")
-        # Defaults to the first item
-        projects_a = st.sidebar.multiselect(
-            "Select project(s) for Baseline Wave:", 
-            options=unique_projects,
-            default=[unique_projects[0]] if unique_projects else []
-        )
-
-        label_recent = st.sidebar.text_input("Comparison Wave Name:", value="Wave Comparison")
-        # Defaults to remaining items if available
-        default_b = [unique_projects[1]] if len(unique_projects) > 1 else []
-        projects_b = st.sidebar.multiselect(
-            "Select project(s) for Comparison Wave:", 
-            options=unique_projects,
-            default=default_b
-        )
-    else:
-        label_prev = st.sidebar.text_input("Baseline Keyword / CRM:", value="108685")
-        label_recent = st.sidebar.text_input("Comparison Keyword / CRM:", value="124897")
-
-        projects_b = [p for p in unique_projects if label_recent.lower() in p.lower()]
-        projects_a = [p for p in unique_projects if label_prev.lower() in p.lower() and p not in projects_b]
-
-        st.sidebar.caption(f"**'{label_prev}' matched:** {len(projects_a)} segment(s)")
-        st.sidebar.caption(f"**'{label_recent}' matched:** {len(projects_b)} segment(s)")
+    label_recent = st.sidebar.text_input("Comparison Wave Name:", value="Recent Wave")
+    default_b = [unique_projects[1]] if len(unique_projects) > 1 else []
+    projects_b = st.sidebar.multiselect("Select project(s) for Comparison Wave:", options=unique_projects, default=default_b)
 
     if not projects_a or not projects_b:
         st.warning("Please ensure at least one project/segment is selected for both waves.")
         st.stop()
 
     # ----------------------------------------------------
-    # 4. Supplier 3-Group Blend Mapping
+    # 5. Group Classification (Rules Alignment)
     # ----------------------------------------------------
-    def map_to_group(supp_name):
+    def clean_group(supp_name):
         s = str(supp_name).lower()
         if "prime insights" in s:
-            return "Group 1 (Prime Insights)"
+            return "Group 1"
         elif any(f in s for f in ["fusion", "social loop"]):
-            return "Group 2 (Fusion & Social Loop)"
-        else:
-            return "Group 3 (Group MP / Marketplace)"
+            return "Group 2"
+        return "Group MP"
 
-    df['Blend Group'] = df[supplier_col].apply(map_to_group)
+    df['Blend Group'] = df[supplier_col].apply(clean_group)
 
     df_prev = df[df[project_col].isin(projects_a)]
     df_recent = df[df[project_col].isin(projects_b)]
@@ -141,37 +174,77 @@ if uploaded_file is not None:
     tot_recent = len(df_recent)
 
     # ----------------------------------------------------
-    # 5. KPI Cards
+    # 6. KPI Summary Cards
     # ----------------------------------------------------
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric(f"{label_prev} Total (N)", f"{tot_prev:,}")
+        st.metric(f"{label_prev} (N)", f"{tot_prev:,}")
         st.caption(f"{len(projects_a)} segment(s)")
     with k2:
-        st.metric(f"{label_recent} Total (N)", f"{tot_recent:,}")
+        st.metric(f"{label_recent} (N)", f"{tot_recent:,}")
         st.caption(f"{len(projects_b)} segment(s)")
     with k3:
-        st.metric("Total Records Analyzed", f"{tot_prev + tot_recent:,}")
+        st.metric("Total Completes", f"{tot_prev + tot_recent:,}")
     with k4:
         delta_records = tot_recent - tot_prev
-        st.metric("Sample Variance", f"{abs(delta_records):,}", f"{delta_records:+} Comparison vs Baseline")
+        st.metric("Sample Difference", f"{abs(delta_records):,}", f"{delta_records:+} Comparison vs Baseline")
 
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 6. 3-Group Blend Summary Table
+    # 7. Alignment vs David's UK Target Rules
     # ----------------------------------------------------
-    st.subheader(f"🏢 3-Group Blend Summary: {label_prev} vs {label_recent}")
-    st.caption("Consolidated rollup matching standard allocation rules: Group 1, Group 2, and Group 3.")
+    uk_targets = {
+        "Group 1": 0.25,
+        "Group 2": 0.35,
+        "Group MP": 0.40
+    }
 
-    group_order = [
-        "Group 1 (Prime Insights)",
-        "Group 2 (Fusion & Social Loop)",
-        "Group 3 (Group MP / Marketplace)"
-    ]
+    # Override if loaded dynamically from master rules file
+    if not target_df.empty:
+        uk_df = target_df[target_df['Country'].str.lower().isin(['united kingdom', 'uk'])]
+        if not uk_df.empty:
+            uk_targets = dict(zip(uk_df['Supplier Group'], uk_df['Target Allocation']))
 
-    grp_counts_prev = df_prev['Blend Group'].value_counts()
+    st.subheader(f"🎯 Target Alignment vs David's UK Blend Rules ({label_recent})")
+    st.caption("David's Target Quota: Group 1 (25%), Group 2 (35%), Group MP (40%). Tolerance: ±3.0%")
+
     grp_counts_recent = df_recent['Blend Group'].value_counts()
+    
+    align_cols = st.columns(3)
+    target_kpi_info = {}
+
+    for idx, (grp, target_pct) in enumerate(uk_targets.items()):
+        achieved_n = int(grp_counts_recent.get(grp, 0))
+        achieved_pct = (achieved_n / tot_recent * 100) if tot_recent > 0 else 0.0
+        target_display = target_pct * 100
+        delta = achieved_pct - target_display
+
+        status = "🟢 Aligned" if abs(delta) <= 3.0 else ("🟡 Over Target" if delta > 3.0 else "🔴 Under Target")
+        target_kpi_info[grp] = {
+            "target": target_display,
+            "achieved": achieved_pct,
+            "delta": delta,
+            "status": status
+        }
+
+        with align_cols[idx % 3]:
+            st.metric(
+                label=f"{grp} (Target {target_display:.0f}%)",
+                value=f"{achieved_pct:.1f}%",
+                delta=f"{delta:+.1f}% vs Target"
+            )
+
+    st.markdown("---")
+
+    # ----------------------------------------------------
+    # 8. 3-Group Blend Summary Table
+    # ----------------------------------------------------
+    st.subheader(f"🏢 3-Group Blend Summary Table")
+    st.caption("Consolidated rollup across waves with benchmark comparison against David's UK Targets.")
+
+    group_order = ["Group 1", "Group 2", "Group MP"]
+    grp_counts_prev = df_prev['Blend Group'].value_counts()
 
     group_rows = []
     for g in group_order:
@@ -182,16 +255,22 @@ if uploaded_file is not None:
         g_pct_rec = (g_n_rec / tot_recent * 100) if tot_recent > 0 else 0.0
         g_diff = g_pct_rec - g_pct_prev
 
+        t_pct = uk_targets.get(g, 0.0) * 100
+        t_var = g_pct_rec - t_pct
+
         g_flag = "🔺" if g_diff > 0.5 else ("🔻" if g_diff < -0.5 else "➖")
 
         group_rows.append({
             "Supplier Group": g,
+            "David Target (%)": t_pct,
             f"{label_prev} (N)": g_n_prev,
             f"{label_prev} (%)": g_pct_prev,
             f"{label_recent} (N)": g_n_rec,
             f"{label_recent} (%)": g_pct_rec,
-            "Shift": g_diff,
-            "Direction": f"{g_flag} {g_diff:+.1f}%"
+            "Wave Shift": g_diff,
+            "Shift Direction": f"{g_flag} {g_diff:+.1f}%",
+            "Target Variance": t_var,
+            "Quota Status": target_kpi_info.get(g, {}).get("status", "—")
         })
 
     group_df = pd.DataFrame(group_rows)
@@ -199,9 +278,11 @@ if uploaded_file is not None:
     st.dataframe(
         group_df,
         column_config={
+            "David Target (%)": st.column_config.NumberColumn(format="%.1f%%"),
             f"{label_prev} (%)": st.column_config.NumberColumn(format="%.2f%%"),
             f"{label_recent} (%)": st.column_config.NumberColumn(format="%.2f%%"),
-            "Shift": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Wave Shift": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Target Variance": st.column_config.NumberColumn(format="%+.2f%%"),
         },
         use_container_width=True,
         hide_index=True
@@ -210,7 +291,7 @@ if uploaded_file is not None:
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 7. Detailed Individual Supplier Table
+    # 9. Granular Supplier Table
     # ----------------------------------------------------
     c_title, c_toggle = st.columns([2, 1])
     with c_title:
@@ -242,7 +323,7 @@ if uploaded_file is not None:
 
         shifts.append({
             "supplier": supp,
-            "group": map_to_group(supp),
+            "group": clean_group(supp),
             "n_prev": n_prev,
             "pct_prev": pct_prev,
             "n_recent": n_recent,
@@ -252,7 +333,7 @@ if uploaded_file is not None:
 
         row = {
             "Supplier": supp,
-            "Assigned Group": map_to_group(supp)
+            "Assigned Group": clean_group(supp)
         }
 
         if metric_view in ["Both (N & %)", "Counts Only (N)"]:
@@ -273,7 +354,7 @@ if uploaded_file is not None:
 
     col_configs = {
         "Supplier": st.column_config.TextColumn("Supplier", width="medium"),
-        "Assigned Group": st.column_config.TextColumn("Assigned Group", width="medium"),
+        "Assigned Group": st.column_config.TextColumn("Assigned Group", width="small"),
     }
     if f"{label_prev} (%)" in comp_df.columns:
         col_configs[f"{label_prev} (%)"] = st.column_config.NumberColumn(f"{label_prev} (%)", format="%.2f%%")
@@ -288,43 +369,50 @@ if uploaded_file is not None:
     )
 
     # ----------------------------------------------------
-    # 8. Executive Summary & Insights
+    # 10. Automated Executive Notes & Quota Guidance
     # ----------------------------------------------------
     st.markdown("---")
-    st.subheader("📝 Executive Summary & Shift Analysis")
+    st.subheader("📝 Strategic Alignment & Operational Notes")
 
     shifts_df = pd.DataFrame(shifts)
-
-    g1_shift = group_df[group_df['Supplier Group'].str.contains("Group 1")]["Shift"].values[0]
-    g2_shift = group_df[group_df['Supplier Group'].str.contains("Group 2")]["Shift"].values[0]
-    g3_shift = group_df[group_df['Supplier Group'].str.contains("Group 3")]["Shift"].values[0]
-
     gainers = shifts_df[shifts_df["variance"] >= 1.0].sort_values(by="variance", ascending=False)
     cutbacks = shifts_df[shifts_df["variance"] <= -1.0].sort_values(by="variance", ascending=True)
 
     with st.container(border=True):
-        st.markdown(f"#### 🔎 Strategic Blend Insights ({label_recent} vs {label_prev}):")
+        st.markdown(f"#### 🔎 David's Quota Health & Blend Movements:")
 
-        st.markdown(f"""
-1. **3-Group Blend Movement Dynamics:**
-   * **Group 1 (Prime Insights)**: Shifted by **{g1_shift:+.1f}%** relative to baseline.
-   * **Group 2 (Fusion & Social Loop)**: Shifted by **{g2_shift:+.1f}%**.
-   * **Group 3 (Group MP / Marketplace)**: Shifted by **{g3_shift:+.1f}%**.
-        """)
+        # Target Alignment Summary
+        align_bullets = []
+        action_bullets = []
+        for grp, info in target_kpi_info.items():
+            align_bullets.append(
+                f"**{grp}**: Achieved **{info['achieved']:.1f}%** vs David's target **{info['target']:.0f}%** ({info['status']}, {info['delta']:+.1f}%)"
+            )
+            if info['delta'] > 3.0:
+                action_bullets.append(f"Cap / Throttle intake for **{grp}** (running {info['delta']:+.1f}% over quota).")
+            elif info['delta'] < -3.0:
+                action_bullets.append(f"Boost / Prioritize sample into **{grp}** (running {info['delta']:+.1f}% below quota).")
+
+        st.markdown("1. **Target Quota Deviations (UK Market):**\n   * " + "\n   * ".join(align_bullets))
+
+        if action_bullets:
+            st.markdown("2. **Recommended Corrective Steering:**\n   * " + "\n   * ".join(action_bullets))
+        else:
+            st.markdown("2. **Recommended Corrective Steering:**\n   * ✅ All supplier groups are within the acceptable ±3.0% tolerance band.")
 
         if not gainers.empty:
             gain_bullets = [
                 f"**{r['supplier']}** ({r['group']}): Rose **{r['variance']:+.1f}%** (from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
                 for _, r in gainers.iterrows()
             ]
-            st.markdown(f"2. **Top Individual Increases (Boosted Panels):**\n   * " + "\n   * ".join(gain_bullets))
+            st.markdown("3. **Top Individual Increases (Boosted Vendors):**\n   * " + "\n   * ".join(gain_bullets))
 
         if not cutbacks.empty:
             cut_bullets = [
                 f"**{r['supplier']}** ({r['group']}): Fell **{r['variance']:.1f}%** (from {r['pct_prev']:.1f}% to {r['pct_recent']:.1f}%)"
                 for _, r in cutbacks.iterrows()
             ]
-            st.markdown(f"3. **Top Individual Reductions (Throttled Panels):**\n   * " + "\n   * ".join(cut_bullets))
+            st.markdown("4. **Top Individual Decreases (Throttled Vendors):**\n   * " + "\n   * ".join(cut_bullets))
 
 else:
     st.info("👈 Upload your tracker Excel or CSV file in the sidebar to begin.")
