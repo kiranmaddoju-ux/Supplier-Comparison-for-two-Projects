@@ -6,13 +6,13 @@ import re
 # 1. Page Configuration & Layout
 # ----------------------------------------------------
 st.set_page_config(
-    page_title="Multi-Wave Allocation Comparator",
+    page_title="Wave Allocation Comparator",
     page_icon="⚖️",
     layout="wide"
 )
 
-st.title("⚖️ Multi-Wave Supplier Allocation Comparator")
-st.caption("Compare supplier allocation across W2 2025, W3 2025, and W1 2026 (CRMs 108685 & 124897).")
+st.title("⚖️ Wave & Supplier Allocation Comparator")
+st.caption("Upload tracking files to compare supplier blends across any two waves or project segments.")
 st.markdown("---")
 
 # ----------------------------------------------------
@@ -55,7 +55,7 @@ if uploaded_file is not None:
     project_col = st.sidebar.selectbox("Project / Wave Column:", all_cols, index=proj_def_idx)
     supplier_col = st.sidebar.selectbox("Supplier Column (Name or ID):", all_cols, index=supp_def_idx)
 
-    # Status / Completes Filter (e.g. 21 or Complete)
+    # Optional complete status filter
     filter_completes = st.sidebar.checkbox("Filter by Complete Status (e.g. 21)?", value=True)
     if filter_completes:
         status_col = st.sidebar.selectbox("Status Column:", all_cols, index=status_def_idx)
@@ -78,48 +78,47 @@ if uploaded_file is not None:
     unique_projects = sorted(df[project_col].unique())
 
     # ----------------------------------------------------
-    # 3. Smart Wave Tagging (Handles 3 Waves Across 2 CRMs)
+    # 3. Flexible Wave Grouping (Universal for Any File)
     # ----------------------------------------------------
-    def tag_wave(p_name):
-        p_lower = p_name.lower()
-        if "124897" in p_name or "w1-2026" in p_lower or "w1 2026" in p_lower:
-            return "W1 2026 (CRM 124897)"
-        elif "w3" in p_lower:
-            return "W3 2025 (CRM 108685)"
-        elif "w2" in p_lower:
-            return "W2 2025 (CRM 108685)"
-        elif "108685" in p_name:
-            return "CRM 108685 (Other)"
-        return "Unassigned"
-
-    df['Detected Wave'] = df[project_col].apply(tag_wave)
-    available_waves = [w for w in df['Detected Wave'].unique() if w != "Unassigned"]
-
     st.sidebar.markdown("---")
-    st.sidebar.header("🎯 Wave Comparison Selection")
+    st.sidebar.header("🎯 Wave / Study Grouping")
 
-    if len(available_waves) >= 2:
-        # Default: compare Previous (W3 2025) vs Recent (W1 2026)
-        def_prev_idx = 0
-        def_recent_idx = 1
-        for idx, w in enumerate(available_waves):
-            if "w3" in w.lower():
-                def_prev_idx = idx
-            elif "w1" in w.lower():
-                def_recent_idx = idx
+    group_mode = st.sidebar.radio(
+        "Wave Definition Method:",
+        ["Select Project Segments (Multiselect)", "Match by Keyword / CRM ID"],
+        index=0
+    )
 
-        wave_prev = st.sidebar.selectbox("Baseline Wave:", available_waves, index=def_prev_idx)
-        wave_recent = st.sidebar.selectbox("Comparison Wave:", available_waves, index=def_recent_idx)
+    if group_mode == "Select Project Segments (Multiselect)":
+        label_prev = st.sidebar.text_input("Baseline Wave Name:", value="Wave Baseline")
+        # Defaults to the first item
+        projects_a = st.sidebar.multiselect(
+            "Select project(s) for Baseline Wave:", 
+            options=unique_projects,
+            default=[unique_projects[0]] if unique_projects else []
+        )
+
+        label_recent = st.sidebar.text_input("Comparison Wave Name:", value="Wave Comparison")
+        # Defaults to remaining items if available
+        default_b = [unique_projects[1]] if len(unique_projects) > 1 else []
+        projects_b = st.sidebar.multiselect(
+            "Select project(s) for Comparison Wave:", 
+            options=unique_projects,
+            default=default_b
+        )
     else:
-        st.error("Could not automatically classify at least 2 distinct waves.")
-        st.stop()
+        label_prev = st.sidebar.text_input("Baseline Keyword / CRM:", value="108685")
+        label_recent = st.sidebar.text_input("Comparison Keyword / CRM:", value="124897")
 
-    if wave_prev == wave_recent:
-        st.warning("Please choose two distinct waves to compare.")
-        st.stop()
+        projects_b = [p for p in unique_projects if label_recent.lower() in p.lower()]
+        projects_a = [p for p in unique_projects if label_prev.lower() in p.lower() and p not in projects_b]
 
-    label_prev = wave_prev
-    label_recent = wave_recent
+        st.sidebar.caption(f"**'{label_prev}' matched:** {len(projects_a)} segment(s)")
+        st.sidebar.caption(f"**'{label_recent}' matched:** {len(projects_b)} segment(s)")
+
+    if not projects_a or not projects_b:
+        st.warning("Please ensure at least one project/segment is selected for both waves.")
+        st.stop()
 
     # ----------------------------------------------------
     # 4. Supplier 3-Group Blend Mapping
@@ -135,34 +134,35 @@ if uploaded_file is not None:
 
     df['Blend Group'] = df[supplier_col].apply(map_to_group)
 
-    # Subsets for selected waves
-    df_prev = df[df['Detected Wave'] == wave_prev]
-    df_recent = df[df['Detected Wave'] == wave_recent]
+    df_prev = df[df[project_col].isin(projects_a)]
+    df_recent = df[df[project_col].isin(projects_b)]
 
     tot_prev = len(df_prev)
     tot_recent = len(df_recent)
 
     # ----------------------------------------------------
-    # 5. KPI Summary Cards
+    # 5. KPI Cards
     # ----------------------------------------------------
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric(f"{wave_prev} (N)", f"{tot_prev:,}")
+        st.metric(f"{label_prev} Total (N)", f"{tot_prev:,}")
+        st.caption(f"{len(projects_a)} segment(s)")
     with k2:
-        st.metric(f"{wave_recent} (N)", f"{tot_recent:,}")
+        st.metric(f"{label_recent} Total (N)", f"{tot_recent:,}")
+        st.caption(f"{len(projects_b)} segment(s)")
     with k3:
-        st.metric("Combined Completes", f"{tot_prev + tot_recent:,}")
+        st.metric("Total Records Analyzed", f"{tot_prev + tot_recent:,}")
     with k4:
         delta_records = tot_recent - tot_prev
-        st.metric("Sample Difference", f"{abs(delta_records):,}", f"{delta_records:+} Recent vs Prev")
+        st.metric("Sample Variance", f"{abs(delta_records):,}", f"{delta_records:+} Comparison vs Baseline")
 
     st.markdown("---")
 
     # ----------------------------------------------------
-    # 6. 3-Group Blend Allocation Table
+    # 6. 3-Group Blend Summary Table
     # ----------------------------------------------------
-    st.subheader(f"🏢 3-Group Blend Summary: {wave_prev} vs {wave_recent}")
-    st.caption("Consolidated rollup matching your allocation rules: Group 1, Group 2, and Group 3 (Group MP).")
+    st.subheader(f"🏢 3-Group Blend Summary: {label_prev} vs {label_recent}")
+    st.caption("Consolidated rollup matching standard allocation rules: Group 1, Group 2, and Group 3.")
 
     group_order = [
         "Group 1 (Prime Insights)",
@@ -186,11 +186,11 @@ if uploaded_file is not None:
 
         group_rows.append({
             "Supplier Group": g,
-            f"{wave_prev} (N)": g_n_prev,
-            f"{wave_prev} (%)": g_pct_prev,
-            f"{wave_recent} (N)": g_n_rec,
-            f"{wave_recent} (%)": g_pct_rec,
-            "Shift (Recent - Prev)": g_diff,
+            f"{label_prev} (N)": g_n_prev,
+            f"{label_prev} (%)": g_pct_prev,
+            f"{label_recent} (N)": g_n_rec,
+            f"{label_recent} (%)": g_pct_rec,
+            "Shift": g_diff,
             "Direction": f"{g_flag} {g_diff:+.1f}%"
         })
 
@@ -199,9 +199,9 @@ if uploaded_file is not None:
     st.dataframe(
         group_df,
         column_config={
-            f"{wave_prev} (%)": st.column_config.NumberColumn(format="%.2f%%"),
-            f"{wave_recent} (%)": st.column_config.NumberColumn(format="%.2f%%"),
-            "Shift (Recent - Prev)": st.column_config.NumberColumn(format="%+.2f%%"),
+            f"{label_prev} (%)": st.column_config.NumberColumn(format="%.2f%%"),
+            f"{label_recent} (%)": st.column_config.NumberColumn(format="%.2f%%"),
+            "Shift": st.column_config.NumberColumn(format="%+.2f%%"),
         },
         use_container_width=True,
         hide_index=True
@@ -214,7 +214,7 @@ if uploaded_file is not None:
     # ----------------------------------------------------
     c_title, c_toggle = st.columns([2, 1])
     with c_title:
-        st.subheader("📋 Individual Supplier Breakdown")
+        st.subheader("📋 Granular Supplier Breakdown")
     with c_toggle:
         metric_view = st.radio(
             "Display Metrics:",
@@ -256,28 +256,28 @@ if uploaded_file is not None:
         }
 
         if metric_view in ["Both (N & %)", "Counts Only (N)"]:
-            row[f"{wave_prev} (N)"] = n_prev
-            row[f"{wave_recent} (N)"] = n_recent
+            row[f"{label_prev} (N)"] = n_prev
+            row[f"{label_recent} (N)"] = n_recent
 
         if metric_view in ["Both (N & %)", "Share Only (%)"]:
-            row[f"{wave_prev} (%)"] = pct_prev
-            row[f"{wave_recent} (%)"] = pct_recent
+            row[f"{label_prev} (%)"] = pct_prev
+            row[f"{label_recent} (%)"] = pct_recent
             row["Variance"] = variance
             row["Trend"] = f"{shift_flag} {variance:+.1f}%"
 
         rows.append(row)
 
     comp_df = pd.DataFrame(rows)
-    sort_target = f"{wave_recent} (%)" if f"{wave_recent} (%)" in comp_df.columns else f"{wave_recent} (N)"
+    sort_target = f"{label_recent} (%)" if f"{label_recent} (%)" in comp_df.columns else f"{label_recent} (N)"
     comp_df = comp_df.sort_values(by=sort_target, ascending=False)
 
     col_configs = {
         "Supplier": st.column_config.TextColumn("Supplier", width="medium"),
         "Assigned Group": st.column_config.TextColumn("Assigned Group", width="medium"),
     }
-    if f"{wave_prev} (%)" in comp_df.columns:
-        col_configs[f"{wave_prev} (%)"] = st.column_config.NumberColumn(f"{wave_prev} (%)", format="%.2f%%")
-        col_configs[f"{wave_recent} (%)"] = st.column_config.NumberColumn(f"{wave_recent} (%)", format="%.2f%%")
+    if f"{label_prev} (%)" in comp_df.columns:
+        col_configs[f"{label_prev} (%)"] = st.column_config.NumberColumn(f"{label_prev} (%)", format="%.2f%%")
+        col_configs[f"{label_recent} (%)"] = st.column_config.NumberColumn(f"{label_recent} (%)", format="%.2f%%")
         col_configs["Variance"] = st.column_config.NumberColumn("Shift", format="%+.2f%%")
 
     st.dataframe(
@@ -288,22 +288,22 @@ if uploaded_file is not None:
     )
 
     # ----------------------------------------------------
-    # 8. Automated Executive Summary & Reading Guide
+    # 8. Executive Summary & Insights
     # ----------------------------------------------------
     st.markdown("---")
     st.subheader("📝 Executive Summary & Shift Analysis")
 
     shifts_df = pd.DataFrame(shifts)
 
-    g1_shift = group_df[group_df['Supplier Group'].str.contains("Group 1")]["Shift (Recent - Prev)"].values[0]
-    g2_shift = group_df[group_df['Supplier Group'].str.contains("Group 2")]["Shift (Recent - Prev)"].values[0]
-    g3_shift = group_df[group_df['Supplier Group'].str.contains("Group 3")]["Shift (Recent - Prev)"].values[0]
+    g1_shift = group_df[group_df['Supplier Group'].str.contains("Group 1")]["Shift"].values[0]
+    g2_shift = group_df[group_df['Supplier Group'].str.contains("Group 2")]["Shift"].values[0]
+    g3_shift = group_df[group_df['Supplier Group'].str.contains("Group 3")]["Shift"].values[0]
 
     gainers = shifts_df[shifts_df["variance"] >= 1.0].sort_values(by="variance", ascending=False)
     cutbacks = shifts_df[shifts_df["variance"] <= -1.0].sort_values(by="variance", ascending=True)
 
     with st.container(border=True):
-        st.markdown(f"#### 🔎 Strategic Blend Insights ({wave_recent} vs {wave_prev}):")
+        st.markdown(f"#### 🔎 Strategic Blend Insights ({label_recent} vs {label_prev}):")
 
         st.markdown(f"""
 1. **3-Group Blend Movement Dynamics:**
